@@ -6,8 +6,8 @@ require("dotenv").config();
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const bot = new TelegramBot(token, { polling: true });
 
-// База даних користувачів: зберігає, на якому кроці знаходиться кожен користувач
-let usersState = {}; // Формат: { chatId: { day: number, step: number } }
+// База даних користувачів: зберігає стан кожного користувача
+let usersState = {}; // Формат: { chatId: { day: number, step: number, startDate: Date, lastActive: Date } }
 
 // Посилання на відео та файли
 const courseContent = [
@@ -133,10 +133,15 @@ const courseContent = [
     day: 7,
     steps: [
       {
-        text: "Вітаю! 🎉 Ви завершили курс 'Шлях до спокою'. Сьогодні ми підсумуємо всі знання та техніки, які ви опанували.",
+        text: "Вітаю! 🎉 Ви дійшли до фіналу курсу 'Шлях до спокою: як швидко позбутися панічних атак'. Сьогодні ми підсумуємо всі знання та техніки, які ви опанували.",
         video: "https://youtu.be/sPv3oX8aQBU",
         button: "Перейти до перегляду 🎥",
       },
+      {
+        text: "Завантажте собі Чек-лист! Він допоможе структурувати та застосувати на практиці знання, які ви отримали під час курсу. 📚",
+        pdf: "./files/CheckList.pdf",
+      },
+
       {
         text: "Для релаксу проведемо авторську медитацію 'Зірка'. 🧘‍♀️ Вона допоможе вам розслабитися та відчути внутрішній спокій.",
         video: "https://youtu.be/pk8_7tBcRuU",
@@ -147,10 +152,7 @@ const courseContent = [
         video: "https://youtu.be/dsTbpMFcXko",
         button: "Перейти до перегляду 🎥",
       },
-      {
-        text: "Корисний матеріал у PDF: 📚",
-        pdf: "./files/grounding_guide.pdf",
-      },
+
       {
         text: "Бонус! 🎶 Три медитативні треки для завантаження:",
         audio: [
@@ -160,12 +162,28 @@ const courseContent = [
         ],
       },
       {
+        text: "Це ще не все! Я підготувала пам'ятку, яку Ви зможете роздрукувати. Виконуйте ці рекомендації і панічна атака ніколи не захопить зненацька! 📚",
+        pdf: "./files/practice_every_day.pdf",
+      },
+      {
+        text: "І це ще не все! Це пам'ятка, як поводитися під час панічної атаки! Запамятайте, тільки регулярні тренування допоможуть швидко подолати панічну атаку та позбутися їх назавжди! 📚",
+        pdf: "./files/stop_panic_attack.pdf",
+      },
+      {
         text: "Дякую, що були зі мною на цьому шляху! ❤ Бажаю вам гармонії та спокою.",
       },
     ],
   },
 ];
 
+// Функція для перевірки, чи доступ користувача не закінчився
+const isAccessValid = (startDate) => {
+  const currentDate = new Date();
+  const expiryDate = new Date(startDate);
+  expiryDate.setMonth(expiryDate.getMonth() + 6); // Додаємо 6 місяців до дати початку
+
+  return currentDate <= expiryDate;
+};
 
 // Функція для надсилання поточного кроку користувачу
 const sendStep = async (chatId) => {
@@ -173,7 +191,24 @@ const sendStep = async (chatId) => {
 
   if (!userState) return;
 
-  const { day, step } = userState;
+  const { day, step, startDate } = userState;
+
+  // Перевіряємо, чи доступ активний
+  if (!isAccessValid(startDate)) {
+    bot.sendMessage(
+      chatId,
+      "Ваш доступ до курсу закінчився. Хочете продовжити? 😊",
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "Продовжити доступ", callback_data: "renew_access" }],
+          ],
+        },
+      }
+    );
+    return;
+  }
+
   const todayContent = courseContent.find((content) => content.day === day);
 
   if (!todayContent || !todayContent.steps[step]) {
@@ -228,6 +263,30 @@ const sendStep = async (chatId) => {
     });
   }
 };
+
+// Функція для перевірки активності користувачів
+const checkUserActivity = () => {
+  const currentDate = new Date();
+
+  for (const chatId in usersState) {
+    const userState = usersState[chatId];
+    const { lastActive } = userState;
+
+    if (
+      lastActive &&
+      (currentDate - new Date(lastActive)) / (1000 * 60 * 60 * 24) > 3
+    ) {
+      bot.sendMessage(
+        chatId,
+        "Ми помітили, що ви не продовжуєте курс. 😊 Поверніться до матеріалів, щоб завершити навчання!"
+      );
+    }
+  }
+};
+
+// Розклад для перевірки активності
+schedule.scheduleJob("0 18 * * *", checkUserActivity); // Щодня о 18:00
+
 // Команда /start
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
@@ -238,7 +297,12 @@ bot.onText(/\/start/, (msg) => {
   }
 
   // Ініціалізуємо стан користувача
-  usersState[chatId] = { day: 1, step: 0 };
+  usersState[chatId] = {
+    day: 1,
+    step: 0,
+    startDate: new Date(), // Зберігаємо дату початку
+    lastActive: new Date(),
+  };
 
   bot.sendMessage(
     chatId,
@@ -254,10 +318,31 @@ bot.on("callback_query", (query) => {
   const chatId = query.message.chat.id;
 
   if (query.data === "continue") {
-    // Збільшуємо крок користувача
-    usersState[chatId].step += 1;
+    const userState = usersState[chatId];
 
-    // Відправляємо наступний крок
+    // Якщо день не завершений, продовжуємо поточний день
+    const todayContent = courseContent.find(
+      (content) => content.day === userState.day
+    );
+    if (todayContent && userState.step < todayContent.steps.length - 1) {
+      usersState[chatId].step += 1;
+    } else {
+      // Якщо день завершено, переходимо до наступного
+      usersState[chatId].day += 1;
+      usersState[chatId].step = 0;
+    }
+
+    usersState[chatId].lastActive = new Date();
+    sendStep(chatId);
+  }
+
+  if (query.data === "renew_access") {
+    // Оновлюємо дату початку доступу
+    usersState[chatId].startDate = new Date();
+    bot.sendMessage(
+      chatId,
+      "Ваш доступ успішно продовжено ще на 6 місяців! 🚀"
+    );
     sendStep(chatId);
   }
 });
